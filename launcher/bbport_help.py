@@ -961,7 +961,13 @@ class HelpMixin:
         def work():
             try:
                 import game_files
-                result = game_files.check(game, progress)
+                # The list came from a PC whose common.tpf.dcx a tool had rewritten, the original kept as
+                # .bak: the .bak's size and checksum are the clean file's (R93, PR #137).
+                clean = game_files.read_list()
+                original = clean.pop('dvdroot_ps4/menu/common.tpf.dcx.bak', None)
+                if original:
+                    clean['dvdroot_ps4/menu/common.tpf.dcx'] = original
+                result = game_files.check(game, progress, clean)
                 bad = result['differ'] + result['missing']
                 text = (_('All {} game files are those of the clean 1.09.').format(number(result['checked']))
                         if not bad else
