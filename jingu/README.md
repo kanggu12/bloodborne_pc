@@ -1,13 +1,20 @@
 # dev branch
 
 `windows` from Supermedo/bloodborne_pc with my open pull requests merged, plus what is not meant for upstream. This is the
-build I play. When a pull request lands, its commits leave this branch.
+build I play and the fork's default branch. When a pull request lands, upstream gets merged in here and that difference is gone.
+
+My pull requests: [#151 to #158](https://github.com/Supermedo/bloodborne_pc/pulls?q=is%3Apr+author%3Akanggu12).
 
 Build it like the port itself, see `packaging/windows/README.md`:
 
-    git submodule update --init --recursive
+    git clone --recursive https://github.com/kanggu12/bloodborne_pc.git
+    cd bloodborne_pc
     bash build.sh
     bash packaging/windows/package.sh
+
+Every push to this branch runs `.github/workflows/dev-ci.yml`: the launcher check, the build, the C++ tests that came with the
+pull requests and the package, which stays in the run's artifacts for 14 days. It has what a clone can build, see below for
+the rest. `gh workflow run dev-ci.yml -f ref=<branch>` runs the same on a contribution branch.
 
 ## Only here
 
@@ -29,5 +36,6 @@ are off (rainbow floors in one DLC area).
 
 ## Not in the repository
 
-The game, third-party mods, and NVIDIA's DLSS files (`nvngx_*.dll`; `bbport_dlss.dll` needs the SDK and MSVC, see
-`packaging/windows/README.md`).
+The game, third-party mods, the FSR 4 assets (`bash tools/fetch_fsr4_assets.sh` gets them) and NVIDIA's DLSS files
+(`nvngx_*.dll`; `bbport_dlss.dll` needs the SDK and MSVC, see `packaging/windows/README.md`). The official release's ZIP has
+these too.
