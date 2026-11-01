@@ -369,6 +369,10 @@ add_executable(render-cache-test EXCLUDE_FROM_ALL ../tests/test_render_cache.cpp
 target_compile_options(render-cache-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(render-cache-test PRIVATE ..)
 
+add_executable(motion-cache-test EXCLUDE_FROM_ALL ../tests/test_motion_cache.cpp)
+target_compile_options(motion-cache-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(motion-cache-test PRIVATE ..)
+
 add_executable(command-buffer-test EXCLUDE_FROM_ALL ../tests/test_command_buffers.cpp)
 target_compile_options(command-buffer-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(command-buffer-test PRIVATE ..)

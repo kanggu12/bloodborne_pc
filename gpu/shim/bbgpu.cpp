@@ -120,6 +120,7 @@ namespace Libraries::GnmDriver { void RegisterLib(Core::Loader::SymbolsResolver*
 namespace Libraries::AvPlayer { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
 namespace Libraries::VideoOut { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
 namespace Libraries::Kernel { void RegisterEventQueue(Core::Loader::SymbolsResolver* sym); }
+namespace Vulkan { void FlushCompileStalls(); }
 
 namespace {
 struct Symbol {
@@ -323,6 +324,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
             SDL_Delay(1);
         }
         LOG_INFO(Frontend, "Window closed by user");
+        Vulkan::FlushCompileStalls(); // bbport: the stalls of the last minutes (0011)
         std::fflush(stdout);
         std::_Exit(0);
     });
@@ -361,6 +363,10 @@ extern "C" uintptr_t bbgpu_resolve(const char* scoped_nid) {
 
 extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {
     return Core::Signals::Instance()->DispatchAccessViolation(ucontext, address) ? 1 : 0;
+}
+
+extern "C" void bbgpu_flush_compile_stalls(void) {
+    Vulkan::FlushCompileStalls();
 }
 
 extern "C" unsigned bbgpu_symbol_count(void) {

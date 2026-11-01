@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -14,6 +15,7 @@
 #include <unordered_set>
 
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
+#include "bbport_motion_cache.h"
 #include "common/hash.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
@@ -549,16 +551,65 @@ void PipelineCache::SaveDriverCache() {
 std::atomic<u64> g_bb_compile_ns;
 std::atomic<u32> g_bb_compiles;
 namespace {
+// bbport: the same time, never reset (BB_FRAME_STATS takes the two above every 5 seconds).
+std::atomic<u64> compile_ns_run;
+
 struct CompileTimer {
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     ~CompileTimer() {
-        g_bb_compile_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                   std::chrono::steady_clock::now() - start)
-                                   .count());
+        const u64 ns = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now() - start)
+                               .count());
+        g_bb_compile_ns += ns;
+        compile_ns_run += ns;
         ++g_bb_compiles;
     }
 };
+
+// bbport: a draw that waited for a shader or pipeline compile while the game is played, in a
+// log line at most every 5 minutes (bbport_motion_cache.h): what the pipeline cache leaves.
+std::mutex stall_mutex;
+BbMotionCache::Stalls stalls;
+
+u64 NowNs() {
+    return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+                   .count());
+}
+
+void NoteCompileStall(u64 waited_ns, bool pipeline, bool motion) {
+    constexpr u64 Interval = 300'000'000'000ull;
+    const u64 now = NowNs();
+    std::scoped_lock lock{stall_mutex};
+    if (stalls.Note(now, waited_ns, pipeline, motion, Interval)) {
+        char line[384];
+        stalls.Format(line, sizeof(line), now);
+        std::printf("%s", line);
+    }
+}
+
+struct StallNote {
+    const u64 before = compile_ns_run.load(std::memory_order_relaxed);
+    bool pipeline = false, motion = false;
+    ~StallNote() {
+        const u64 waited = compile_ns_run.load(std::memory_order_relaxed) - before;
+        if (waited) {
+            NoteCompileStall(waited, pipeline, motion);
+        }
+    }
+};
 } // namespace
+
+// bbport: the line of the window the game ends in, which no later wait writes (the window
+// thread and the restart call this before the process ends).
+void FlushCompileStalls() {
+    std::scoped_lock lock{stall_mutex};
+    if (stalls.Pending()) {
+        char line[384];
+        stalls.Format(line, sizeof(line), NowNs());
+        std::printf("%s", line);
+    }
+}
 
 bool PipelineCache::PrepareGraphicsPipeline(PipelineSelection& worker_sel) {
     // Tessellation stages read constant buffers from memory at selection time: not prepared.
@@ -613,12 +664,15 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
             return pipeline;
         }
     }
+    StallNote stall; // bbport: counted when this draw compiles a shader or the pipeline
     sel.draw_indirect_params = params;
     if (!RefreshGraphicsKey(sel)) {
         return nullptr;
     }
+    stall.motion = sel.graphics_key.motion_vectors != 0;
     const auto [it, is_new] = graphics_pipelines.try_emplace(sel.graphics_key);
     if (is_new) {
+        stall.pipeline = true;
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(sel.graphics_key);
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
         CompileTimer timer;
@@ -663,11 +717,13 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
 }
 
 const ComputePipeline* PipelineCache::GetComputePipeline() {
+    StallNote stall; // bbport: as for graphics pipelines
     if (!RefreshComputeKey()) {
         return nullptr;
     }
     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
     if (is_new) {
+        stall.pipeline = true;
         const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
         LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
         CompileTimer timer;
@@ -1043,7 +1099,11 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(spv, instance.GetDevice());
     }
 
-    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
+    // bbport: an object motion permutation's binary goes under a name of its own ("_m").
+    const bool motion =
+        (runtime_info.hw_stage == HwStage::Vertex && runtime_info.hw.vs.motion_vectors) ||
+        (runtime_info.hw_stage == HwStage::Fragment && runtime_info.hw.fs.motion_vectors);
+    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx, motion);
 
     const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);

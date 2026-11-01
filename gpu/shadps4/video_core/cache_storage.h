@@ -40,6 +40,9 @@ public:
 
     void Load(BlobType type, const std::string& name, std::vector<u8>& data);
     void Load(BlobType type, const std::string& name, std::vector<u32>& data);
+    /// bbport: whether a directory cache holds the blob (Load of a missing one logs an error).
+    /// True for an archive cache, which Load reads as before.
+    [[nodiscard]] bool Has(BlobType type, const std::string& name) const;
 
     void ForEachBlob(BlobType type, const std::function<void(std::vector<u8>&& data)>& func);
 

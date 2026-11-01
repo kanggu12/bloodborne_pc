@@ -80,6 +80,12 @@ void PruneCache(const std::filesystem::path& dir) {
             continue;
         }
         total += size;
+        // bbport: the cache's own records stay (profile.bin, build.bin: written once, so the oldest
+        // files). Without them the next start took a full cache for a new one: it preloaded nothing,
+        // and it would have stamped another build's shaders as this build's instead of clearing them.
+        if (entry.path().extension() == ".bin") {
+            continue;
+        }
         files.emplace_back(entry.last_write_time(error), std::pair<u64, std::filesystem::path>{size, entry.path()});
     }
     if (total <= limit) {
@@ -347,6 +353,16 @@ void DataBase::Load(BlobType type, const std::string& name, std::vector<u32>& da
     auto path = EmulatorSettings.IsPipelineCacheArchived() ? std::filesystem::path{name}
                                                            : cache_path / name;
     return LoadVector(type, path, data);
+}
+
+bool DataBase::Has(BlobType type, const std::string& name) const {
+    if (!opened || EmulatorSettings.IsPipelineCacheArchived()) {
+        return true;
+    }
+    auto path = cache_path / name;
+    path.replace_extension(GetBlobFileExtension(type));
+    std::error_code ec;
+    return std::filesystem::is_regular_file(path, ec);
 }
 
 void DataBase::ForEachBlob(BlobType type, const std::function<void(std::vector<u8>&& data)>& func) {

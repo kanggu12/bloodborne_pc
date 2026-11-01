@@ -103,6 +103,8 @@ int bbgpu_input_reload_requested(void);
 void bbgpu_mouse_camera_configure(int direct, float sensitivity, float scale_x, float scale_y, int sync);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned bbgpu_symbol_count(void);
+/* bbport: logs the shader compile stalls not written yet; before the process ends. */
+void bbgpu_flush_compile_stalls(void);
 #ifdef __cplusplus
 }
 #endif

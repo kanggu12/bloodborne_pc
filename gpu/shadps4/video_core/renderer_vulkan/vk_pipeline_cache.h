@@ -101,6 +101,9 @@ struct PipelineSelection {
     struct PrepWorker* worker{}; ///< set: read-only selection for a draw-preparation worker
 };
 
+/// bbport: writes the compile stalls of the window the game ends in (vk_pipeline_cache.cpp).
+void FlushCompileStalls();
+
 /// bbport: a draw-preparation worker's own program state (see vk_draw_prep.h).
 struct PrepWorker {
     struct Stage {
@@ -126,6 +129,9 @@ public:
 
     void WarmUp();
     void Sync();
+    /// bbport: the object motion pipelines WarmUp set aside, once the motion buffers exist
+    /// (ObjectMotion): those whose vertex shader embeds this run's buffer addresses.
+    void PreloadMotionPipelines();
 
     /// bbport: the driver's own pipeline cache (its compiled GPU code), kept on disk next to the
     /// shader cache: a pipeline the driver built once is not compiled again on the next start.
@@ -134,7 +140,8 @@ public:
 
     bool LoadComputePipeline(Serialization::Archive& ar);
     bool LoadGraphicsPipeline(Serialization::Archive& ar);
-    bool LoadPipelineStage(Serialization::Archive& ar, size_t stage);
+    /// key_motion: 1 or 0 for a graphics key with or without object motion, -1 for compute.
+    bool LoadPipelineStage(Serialization::Archive& ar, size_t stage, int key_motion = -1);
 
     const GraphicsPipeline* GetGraphicsPipeline(const DrawIndirectParams params = {},
                                                 const PreparedDraw* prepared = nullptr);
@@ -207,6 +214,11 @@ private:
     PipelineSelection sel{}; ///< GPU thread selection state
     ComputePipelineKey compute_key{};
     std::atomic<u32> num_new_pipelines{}; // new pipelines added to the cache since the game start
+    /// bbport: the cache's object motion keys, until PreloadMotionPipelines.
+    std::vector<std::vector<u8>> motion_keys;
+    bool preloading_motion = false;
+    u32 motion_address_mismatches = 0;
+    u32 motion_index_refusals = 0;
 
     /// bbport: preloaded pipelines are collected first and then built on all CPU cores.
     struct PreloadJob;

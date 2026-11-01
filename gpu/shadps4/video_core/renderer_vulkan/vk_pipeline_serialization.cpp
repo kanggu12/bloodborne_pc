@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <thread>
 
+#include "bbport_motion_cache.h"
 #include "common/serdes.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
@@ -31,8 +32,23 @@ static constexpr u32 PipelineKeyVersion = 7u;
 // bbport: shader binaries carry no version of their own, so their names do: a build with another
 // version writes its binaries beside these instead of over them (where a shader's metadata
 // passed its version check and then loaded the other build's binary).
-static std::string ShaderBinaryName(u64 pgm_hash, size_t perm_idx) {
-    return fmt::format("{:#018x}_{}_v{}", pgm_hash, perm_idx, ShaderBinaryVersion);
+// bbport: an object motion permutation's has "_m": it is kept beside a plain one of its index
+// (the index is the one it had in the run that saved it). Another build's files do not stay: the
+// cache is rebuilt for another shader build (WarmUp).
+static std::string ShaderBinaryName(u64 pgm_hash, size_t perm_idx, bool motion = false) {
+    return fmt::format("{:#018x}_{}_v{}{}", pgm_hash, perm_idx, ShaderBinaryVersion,
+                       motion ? "_m" : "");
+}
+
+// bbport: an object motion permutation's metadata too.
+static std::string ShaderMetaName(u64 perm_hash, bool motion) {
+    return fmt::format("{:#018x}{}", perm_hash, motion ? "_m" : "");
+}
+
+// bbport: whether a stage's specialization is an object motion permutation.
+static bool IsMotion(const Shader::RuntimeInfo& info) {
+    return (info.hw_stage == Shader::HwStage::Vertex && info.hw.vs.motion_vectors) ||
+           (info.hw_stage == Shader::HwStage::Fragment && info.hw.fs.motion_vectors);
 }
 } // namespace Serialization
 
@@ -96,17 +112,19 @@ void RegisterShaderMeta(const Shader::Info& info,
     spec.Serialize(ar);
     info.Serialize(ar);
 
-    Storage::DataBase::Instance().Save(Storage::BlobType::ShaderMeta,
-                                       fmt::format("{:#018x}", perm_hash), ar.TakeOff());
+    Storage::DataBase::Instance().Save(
+        Storage::BlobType::ShaderMeta,
+        Serialization::ShaderMetaName(perm_hash, Serialization::IsMotion(spec.runtime_info)),
+        ar.TakeOff());
 }
 
-void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx) {
+void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx, bool motion) {
     if (!Storage::DataBase::Instance().IsOpened()) {
         return;
     }
 
     Storage::DataBase::Instance().Save(Storage::BlobType::ShaderBinary,
-                                       Serialization::ShaderBinaryName(pgm_hash, perm_idx),
+                                       Serialization::ShaderBinaryName(pgm_hash, perm_idx, motion),
                                        std::move(spv));
 }
 
@@ -134,11 +152,8 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     spec.Deserialize(ar);
     info.Deserialize(ar);
 
-    // Motion vertex shaders embed session-local buffer device addresses. They must be
-    // recompiled for the current allocation, never loaded from a previous process.
-    if (info.hw_stage == Shader::HwStage::Vertex && spec.runtime_info.hw.vs.motion_vectors) {
-        return false;
-    }
+    // bbport: motion vertex shaders, which embed the motion buffers' addresses, are checked by
+    // LoadPipelineStage against this run's buffers (bbport_motion_cache.h).
 
     // bbport: only a stage with a fetch shader sets it, as the run-time path does
     // (PipelineCache::RefreshGraphicsStages). The geometry stage loads after the vertex stage and
@@ -279,14 +294,14 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     sel.fetch_shader.reset();
     sel.graphics_key.Deserialize(ar);
 
-    // bbport: motion-vector pipelines are never preloaded. Their vertex shader embeds session-
-    // local buffer addresses (see LoadShaderMeta), and the shader metadata is stored once per
-    // program, not per permutation: the meta found for a motion pipeline's stages could be the
-    // plain permutation, so LoadShaderMeta's motion check missed it and the preload built the
-    // 8-attachment motion key with plain shaders. The AMD driver refused some of these
-    // (ErrorUnknown: the startup crash), and the ones it accepted were registered under the
-    // motion key without motion output. Built at first use instead, like the vertex shaders.
-    if (sel.graphics_key.motion_vectors) {
+    // bbport: the shader metadata is stored under a permutation's index in the run that saved it,
+    // so the meta found for a motion pipeline's stages could be a plain permutation, and the
+    // preload built the 8-attachment motion key with plain shaders. The AMD driver refused some of
+    // these (ErrorUnknown: the startup crash), and the ones it accepted were registered under the
+    // motion key without motion output. bbport: LoadPipelineStage now takes only the stage kind
+    // the key asks for, and motion keys wait for the motion buffers (PreloadMotionPipelines),
+    // whose addresses their vertex shader embeds.
+    if (sel.graphics_key.motion_vectors && !preloading_motion) {
         return false;
     }
 
@@ -300,15 +315,22 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
         }
 
         std::vector<u8> meta_blob;
-        Storage::DataBase::Instance().Load(Storage::BlobType::ShaderMeta,
-                                           fmt::format("{:#018x}", hash), meta_blob);
+        const auto meta_name =
+            Serialization::ShaderMetaName(hash, sel.graphics_key.motion_vectors != 0);
+        // bbport: a motion key whose stages this run's cache never compiled has no motion meta:
+        // looked up first, as opening a missing file logs an error (hundreds each start).
+        if (sel.graphics_key.motion_vectors &&
+            !Storage::DataBase::Instance().Has(Storage::BlobType::ShaderMeta, meta_name)) {
+            return false;
+        }
+        Storage::DataBase::Instance().Load(Storage::BlobType::ShaderMeta, meta_name, meta_blob);
         if (meta_blob.empty()) {
             return false;
         }
 
         Serialization::Archive meta_ar{std::move(meta_blob)};
 
-        if (!LoadPipelineStage(meta_ar, stage_idx)) {
+        if (!LoadPipelineStage(meta_ar, stage_idx, sel.graphics_key.motion_vectors ? 1 : 0)) {
             return false;
         }
     }
@@ -346,7 +368,7 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     return true;
 }
 
-bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) {
+bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, int key_motion) {
     auto program = std::make_unique<Program>();
     Shader::StageSpecialization spec{};
     spec.info = &program->info;
@@ -355,11 +377,40 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
         return false;
     }
 
+    // bbport: a motion permutation (the vertex shader stores its clip positions, the fragment
+    // shader writes the motion attachment) serves only a motion key, a plain one only a plain key.
+    // The stage is the specialization's, as when its binary was named (CompileModule).
+    const bool motion = Serialization::IsMotion(spec.runtime_info);
+    const bool vertex_motion = motion && spec.runtime_info.hw_stage == Shader::HwStage::Vertex;
+    if (key_motion >= 0 && motion != (key_motion == 1)) {
+        return false;
+    }
+
     std::vector<u32> spv{};
-    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
-                                       Serialization::ShaderBinaryName(program->info.pgm_hash, perm_idx),
-                                       spv);
+    const auto binary_name =
+        Serialization::ShaderBinaryName(program->info.pgm_hash, perm_idx, motion);
+    if (motion &&
+        !Storage::DataBase::Instance().Has(Storage::BlobType::ShaderBinary, binary_name)) {
+        return false; // bbport: as for its meta (LoadGraphicsPipeline), without an error line
+    }
+    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary, binary_name, spv);
     if (spv.empty()) {
+        return false;
+    }
+
+    // bbport: the vertex code's own kind is the meta's: a binary can outlive its meta (the
+    // cache's writes are not drained at exit), and motion code under a plain spec would store
+    // through the motion buffer addresses of the run that compiled it. A motion vertex shader
+    // loads only with this run's addresses. Both checked before it can join the program cache,
+    // where the run-time path finds a permutation by its specialization alone.
+    if (spec.runtime_info.hw_stage == Shader::HwStage::Vertex &&
+        BbMotionCache::HasMotionOutputs(spv) != vertex_motion) {
+        return false;
+    }
+    if (vertex_motion &&
+        !BbMotionCache::EmbedsAddresses(spv, Shader::MotionVectors::params_address,
+                                        Shader::MotionVectors::positions_address)) {
+        ++motion_address_mismatches;
         return false;
     }
 
@@ -388,6 +439,16 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
             }
             module = it->module;
         } else {
+            // bbport: an index another permutation holds is left to it. A plain and a motion
+            // meta of one index can both be in the store (their names differ), and the motion
+            // preload would replace the plain permutation WarmUp loaded there: its pipelines'
+            // draws then compiled it again at another index, every run. This one compiles at run
+            // time instead, at a free index, and preloads from there the next run.
+            const auto& modules = it_pgm.value()->modules;
+            if (perm_idx < modules.size() && modules[perm_idx].module) {
+                motion_index_refusals += preloading_motion ? 1 : 0;
+                return false;
+            }
             module = CompileSPV(spv, instance.GetDevice());
         }
     }
@@ -464,6 +525,7 @@ void PipelineCache::WarmUp() {
 
     u32 num_pipelines{};
     u32 num_total_pipelines{};
+    u32 num_motion_waiting{}; // bbport: not stale, they load after the motion buffers exist
 
     // bbport: the stages are read here, one after the other; the pipelines are then built on
     // all CPU cores (BuildPreloaded), where the driver spends nearly all of the preload's time.
@@ -474,6 +536,15 @@ void PipelineCache::WarmUp() {
         Storage::BlobType::PipelineKey, [&](std::vector<u8>&& data) {
             ++num_total_pipelines;
 
+            // bbport: a graphics key of this version is kept in case it is an object motion one.
+            u32 head[2]{};
+            if (data.size() >= sizeof(head)) {
+                std::memcpy(head, data.data(), sizeof(head));
+            }
+            std::vector<u8> blob;
+            if (head[0] == Serialization::PipelineKeyVersion && head[1] == 0) {
+                blob = data;
+            }
             Serialization::Archive ar{std::move(data)};
             Serialization::Reader pldata{ar};
 
@@ -491,6 +562,11 @@ void PipelineCache::WarmUp() {
                 result = LoadComputePipeline(ar);
             } else {
                 result = LoadGraphicsPipeline(ar);
+                // bbport: an object motion key waits for the motion buffers.
+                if (!result && sel.graphics_key.motion_vectors) {
+                    motion_keys.push_back(std::move(blob));
+                    ++num_motion_waiting;
+                }
             }
 
             if (result) {
@@ -506,14 +582,60 @@ void PipelineCache::WarmUp() {
                     .count());
 
     LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines);
+    // bbport: the object motion keys waiting for PreloadMotionPipelines (its own line) are not
+    // counted here, nor as stale.
     std::printf("Pipeline cache: %u of %u pipelines preloaded (shader build %s)\n", num_pipelines,
-                num_total_pipelines, BB_SHADER_BUILD);
-    if (num_total_pipelines > num_pipelines) {
-        LOG_WARNING(Render, "{} stale pipelines were found. Consider re-generating the cache",
-                    num_total_pipelines - num_pipelines);
+                num_total_pipelines - num_motion_waiting, BB_SHADER_BUILD);
+    if (num_total_pipelines > num_pipelines + num_motion_waiting) {
+        LOG_WARNING(Render,
+                    "{} stale pipelines were found (object motion keys not counted). Consider "
+                    "re-generating the cache",
+                    num_total_pipelines - num_pipelines - num_motion_waiting);
     }
 
     Storage::DataBase::Instance().FinishPreload();
+}
+
+void PipelineCache::PreloadMotionPipelines() {
+    auto keys = std::move(motion_keys);
+    motion_keys.clear();
+    // Object motion off: its pipelines are not used. An archive cache is not read after the
+    // preload (FinishPreload turns it into a writer): it preloads none, as before.
+    if (keys.empty() || !Shader::MotionVectors::positions_address ||
+        EmulatorSettings.IsPipelineCacheArchived()) {
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    std::unique_lock lock{programs_mutex}; // the draw-preparation workers exist by now
+    preloading_motion = true;
+    motion_address_mismatches = 0;
+    motion_index_refusals = 0;
+    u32 loaded = 0;
+    // As in WarmUp: the stages are read one after the other, the pipelines built on all CPU cores.
+    std::vector<PreloadJob> jobs;
+    preload_jobs = &jobs;
+    for (auto& blob : keys) {
+        Serialization::Archive ar{std::move(blob)};
+        Serialization::Reader pldata{ar};
+        u32 version{}, is_compute{};
+        pldata.Read(version);
+        pldata.Read(is_compute);
+        if (LoadGraphicsPipeline(ar)) {
+            ++loaded;
+        }
+    }
+    preload_jobs = nullptr;
+    loaded -= BuildPreloaded(jobs);
+    driver_cache_changes += loaded;
+    preloading_motion = false;
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start)
+                        .count();
+    std::printf("Pipeline cache: %u of %zu object motion pipelines preloaded in %lld ms; the others "
+                "compile when used (%u of them with a vertex shader for other motion buffer "
+                "addresses, %u with a shader at an index this run already holds)\n",
+                loaded, keys.size(), static_cast<long long>(ms), motion_address_mismatches,
+                motion_index_refusals);
 }
 
 // The pipelines only use the device while they are built for the preload (no guest memory, no
