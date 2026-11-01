@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include <vk_mem_alloc.h>
+#include "bbport_hang.h"
 #include "bbport_settings.h"
 #include "bbport_toggles.h"
 #include "shader_recompiler/runtime_info.h"
@@ -109,7 +110,11 @@ ObjectMotion::ObjectMotion(const Instance& instance_, Scheduler& scheduler_)
     Shader::MotionVectors::positions_address = positions_address;
     enabled = true;
     const char* cache_setting = std::getenv("BB_OBJECT_MOTION_CACHE");
-    cache_enabled = cache_setting && std::strcmp(cache_setting, "1") == 0;
+    // bbport: run.py sets that one to 0 with DLSS (the launcher's choice is for FSR), though the
+    // target's size changes as often there: BB_MOTION_TARGET_KEEP=1 asks for the same reuse.
+    const char* keep_setting = std::getenv("BB_MOTION_TARGET_KEEP");
+    cache_enabled = (cache_setting && std::strcmp(cache_setting, "1") == 0) ||
+                    (keep_setting && std::strcmp(keep_setting, "1") == 0);
     std::printf("Object motion: on (%u vertices per frame)\n", PositionsPerFrame);
     std::printf("Object motion: target cache %s (BB_OBJECT_MOTION_CACHE=0|1)\n",
                 cache_enabled ? "on" : "off");
@@ -234,6 +239,7 @@ void ObjectMotion::EnsureImage(u32 width, u32 height) {
                 }
             if (!empty) {
                 // Unusual resolution churn: wait before retiring an old allocation.
+                BbHang::NoteMotionWait();
                 scheduler.Finish();
                 empty = &cached_images[eviction_cursor++ % cached_images.size()];
                 empty->view.reset();
@@ -246,6 +252,7 @@ void ObjectMotion::EnsureImage(u32 width, u32 height) {
     }
     const auto device = instance.GetDevice();
     if (image) {
+        BbHang::NoteMotionWait(); // bbport: the minute's line (bbport_hang.cpp)
         scheduler.Finish();
     }
     view.reset();

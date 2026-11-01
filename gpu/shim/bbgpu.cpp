@@ -324,7 +324,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
             SDL_Delay(1);
         }
         LOG_INFO(Frontend, "Window closed by user");
-        Vulkan::FlushCompileStalls(); // bbport: the stalls of the last minutes (0011)
+        Vulkan::FlushCompileStalls(); // bbport: the stalls of the last minutes
         std::fflush(stdout);
         std::_Exit(0);
     });

@@ -5,6 +5,8 @@
 namespace BbHang {
 /// VideoOut showed a frame.
 void OnFlip();
+/// Object motion's target changed size, which waits for the GPU (counted in the minute's line).
+void NoteMotionWait();
 
 /// The file of a ring of `files` to write after `last` (-1: none yet), never `kept` (-1: none).
 /// The snapshot taken when frames stop keeps its file until frames stop again; the later ones of

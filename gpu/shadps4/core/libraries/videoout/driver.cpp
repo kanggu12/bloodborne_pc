@@ -295,8 +295,6 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
 }
 
 void VideoOutDriver::Flip(const Request& req) {
-    BbFrameRate::OnFlip(); // bbport: per-frame values for the frame the game measured
-    BbHang::OnFlip(); // bbport: thread snapshots while no frame is shown
     BbHang::OnFlip(); // bbport: thread snapshots while no frame is shown
     BbFrameRate::OnFlip(); // bbport: per-frame values for the frame the game measured
     BbRenderCache::OnFlip(); // bbport: the jobs' failed allocations, when they go up

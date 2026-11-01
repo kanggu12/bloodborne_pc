@@ -31,6 +31,7 @@ std::atomic<Clock::rep> last_flip{0};
 std::atomic<unsigned long long> flips{0};
 std::atomic<Clock::rep> worst_gap{0};
 std::atomic<unsigned> long_gaps{0};
+std::atomic<unsigned> motion_waits{0};
 std::atomic<std::uintptr_t> image_base{0};
 std::atomic<std::uint64_t> image_size{0};
 
@@ -94,7 +95,7 @@ void Watch() {
                     std::printf("Hang check: no frame shown for %.1f s; threads written to %s "
                                 "(kept until frames stop again)\n",
                                 quiet, path.c_str());
-                    BbRenderCache::OnStall(); // local fix 0009: its counts, without a flip
+                    BbRenderCache::OnStall(); // its counts, without a flip
                 }
                 hang_snapshot = Clock::now();
                 hung = true;
@@ -105,8 +106,10 @@ void Watch() {
             std::printf("Hang check: frames shown again\n");
             hung = false;
         }
-        if (periodic_stacks && Clock::now() - periodic >= 20s) {
-            Write("periodic", false);
+        if (Clock::now() - periodic >= 20s) {
+            if (periodic_stacks) {
+                Write("periodic", false);
+            }
             BbRenderCache::OnStall();
             periodic = Clock::now();
         }
@@ -114,10 +117,12 @@ void Watch() {
             const unsigned long long shown = flips.load(std::memory_order_relaxed);
             const double seconds = std::chrono::duration<double>(now - minute).count();
             const auto worst = Clock::duration(worst_gap.exchange(0, std::memory_order_relaxed));
-            std::printf("Frames: %llu in %.0f s (%.1f FPS), worst %.1f ms, %u over 33 ms\n",
+            std::printf("Frames: %llu in %.0f s (%.1f FPS), worst %.1f ms, %u over 33 ms; object motion "
+                        "target waits %u\n",
                         shown - minute_flips, seconds, double(shown - minute_flips) / seconds,
                         std::chrono::duration<double, std::milli>(worst).count(),
-                        long_gaps.exchange(0, std::memory_order_relaxed));
+                        long_gaps.exchange(0, std::memory_order_relaxed),
+                        motion_waits.exchange(0, std::memory_order_relaxed));
             minute = now;
             minute_flips = shown;
         }
@@ -127,6 +132,10 @@ void Watch() {
 } // namespace
 
 namespace BbHang {
+void NoteMotionWait() {
+    motion_waits.fetch_add(1, std::memory_order_relaxed);
+}
+
 void OnFlip() {
     const Clock::rep now = Clock::now().time_since_epoch().count();
     const Clock::rep before = last_flip.exchange(now, std::memory_order_relaxed);
