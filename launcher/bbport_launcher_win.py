@@ -1023,6 +1023,10 @@ HUNTERS_DREAM_POOL = os.environ.get('BB_HUNTERS_DREAM', '0') == '1'
 
 
 SIGN_IN_TOO_LONG = 'the sign-in took too long; start it again'  # Korean only, kept out of _('...') for the translation test
+USE_ACCOUNT = 'Use existing account'
+USE_ACCOUNT_EMPTY = 'Enter the Online ID and the password of your account.'
+USE_ACCOUNT_DONE = 'Account {} is saved; the game checks it when it signs in. Press Play.'
+USE_ACCOUNT_REPLACE = 'Use account {} instead of {}?'
 SHADNET_ERRORS = {3: 'The name or the email address is not valid.', 4: 'Too soon: try again in a minute.',
                   11: 'This name is taken.', 12: 'This email provider is not allowed.',
                   13: 'An account with this email address exists already.', 23: 'Sign-up is closed.'}
@@ -3510,7 +3514,28 @@ class Launcher(bbport_setup.SetupMixin, bbport_help.HelpMixin, bbport_search.Sea
                  key='supermedo_npid')
         self.row(f, _('Email address'), ttk.Entry(f, textvariable=email, width=40),
                  _('Only to make the account.'), key='supermedo_npid')
-        button = self.row(f, '', ttk.Button(f, text=_('Create account'), command=create_account))
+
+        def use_account():
+            # An account made earlier, on this PC or another: there was no way back in after Sign out. Stored as
+            # the boxes hold it; the game's own sign-in tells whether it is right.
+            npid, password = new_npid.get().strip(), new_password.get()
+            if not npid or not password or '@' in npid:  # an email address is no Online ID
+                sign_up.configure(text=_(USE_ACCOUNT_EMPTY))
+                return
+            signed_in = npid_var.get().strip()
+            if signed_in and signed_in != npid and not self.messagebox.askyesno(
+                    'Bloodborne', _(USE_ACCOUNT_REPLACE).format(npid, signed_in)):
+                return
+            npid_var.set(npid)
+            password_var.set(password)
+            sign_up.configure(text=_(USE_ACCOUNT_DONE).format(npid))
+            discord_line.configure(text='')
+            self.save_settings()
+        account_buttons = ttk.Frame(f)
+        button = ttk.Button(account_buttons, text=_('Create account'), command=create_account)
+        button.pack(side='left')
+        ttk.Button(account_buttons, text=_(USE_ACCOUNT), command=use_account).pack(side='left', padx=(14, 0))
+        self.row(f, '', account_buttons)
         self.index_entry(button, _('Create account'), _('New SuperMedo account'), key='button:create_account')
         sign_up.grid(row=self.next_row(f), column=1, sticky='we', pady=(6, 0))
         group('supermedo')
