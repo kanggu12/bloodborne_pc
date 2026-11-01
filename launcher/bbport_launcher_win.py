@@ -34,6 +34,10 @@ PORT_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).r
 sys.path.insert(0, str(PORT_DIR / 'scripts'))
 import fetch_fsr4vk
 DATA_DIR = Path(os.environ.get('BB_DATA_DIR', PORT_DIR))
+# The test folder of my pipeline (tools/pipeline.py in my project, not in this repository): its settings stay inside it,
+# however it is started. No installation has this file otherwise.
+if (PORT_DIR / 'pipeline-test.json').is_file():
+    os.environ['APPDATA'] = str(PORT_DIR / 'appdata')
 # Co-op test build: its own settings, and no updates (a public release would replace it).
 COOP_TEST = False
 CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / ('bbport-launcher-coop' if COOP_TEST else 'bbport-launcher')
