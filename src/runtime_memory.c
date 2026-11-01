@@ -25,7 +25,7 @@
 #endif
 /* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB. BB_DMEM_MB raises it (the resolution
  * patches above 1080p need about 4 GiB more; run.sh sets it). */
-static uint64_t pool_size_bytes(void) {
+static uint64_t game_pool_bytes(void) {
     static uint64_t size;
     if (!size) {
         const char *env = getenv("BB_DMEM_MB");
@@ -35,7 +35,25 @@ static uint64_t pool_size_bytes(void) {
     }
     return size;
 }
+/* bbport: direct memory past the game's size for the port's own guest allocations
+ * (runtime_extra_direct_map: the render resource cache's larger backing, as bbport 0.6 has it,
+ * off by default, bbport_render_cache.cpp). The game neither sees nor allocates it.
+ * BB_DMEM_EXTRA_MB (0..2048, default 0); none when it does not fit Windows' commit limit with the
+ * game's pool (pool()). */
+static int64_t extra_size=-1;
+static uint64_t extra_pool_bytes(void) {
+    if (extra_size<0) {
+        const char *env = getenv("BB_DMEM_EXTRA_MB");
+        long long mb = env ? strtoll(env, NULL, 10) : 0;
+        if (mb < 0) mb = 0;
+        if (mb > 2048) mb = 2048;
+        extra_size = (int64_t)mb * 1024 * 1024;
+    }
+    return (uint64_t)extra_size;
+}
+static uint64_t pool_size_bytes(void) { return game_pool_bytes() + extra_pool_bytes(); }
 #define POOL_SIZE pool_size_bytes()
+#define GAME_POOL_SIZE game_pool_bytes()
 #define FLEXIBLE_SIZE (UINT64_C(448) * 1024 * 1024)
 #define PAGE UINT64_C(16384)
 #define USER_MIN UINT64_C(0x1000000000)
@@ -327,6 +345,18 @@ static int pool(void) {
     const char *on_map=getenv("BB_GUEST_COMMIT_ON_MAP");
     if (on_map && on_map[0]=='1') SetLastError(ERROR_COMMITMENT_LIMIT);
     else section=CreateFileMapping2(INVALID_HANDLE_VALUE,NULL,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_COMMIT,bytes,NULL,NULL,0);
+    if (!section && extra_pool_bytes() && !(on_map && on_map[0]=='1') &&
+        (GetLastError()==ERROR_NO_SYSTEM_RESOURCES || GetLastError()==ERROR_COMMITMENT_LIMIT)) {
+        /* bbport: with the port's extra direct memory it does not fit; the game's pool alone is
+         * committed at once as before, and the port gets none. */
+        DWORD error=GetLastError();
+        uint64_t extra=extra_pool_bytes();
+        extra_size=0;
+        bytes=POOL_SIZE+FLEX_SPAN;
+        section=CreateFileMapping2(INVALID_HANDLE_VALUE,NULL,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_COMMIT,bytes,NULL,NULL,0);
+        if (section) printf("Runtime: the port's %" PRIu64 " MiB of extra direct memory do not fit Windows' "
+                            "commit limit (error %lu): without them\n",extra>>20,error);
+    }
     if (!section && (GetLastError()==ERROR_NO_SYSTEM_RESOURCES || GetLastError()==ERROR_COMMITMENT_LIMIT)) {
         /* The pool is sized for the largest resolutions (BB_DMEM_MB, 12+ GiB) and committed at
          * once it exceeded RAM + page file (error 1450) although the game maps much less: then
@@ -504,13 +534,13 @@ static int direct_range_allocated(uint64_t phys, uint64_t size) {
     return 1;
 }
 
-static ABI uint64_t direct_size(void) { return POOL_SIZE; }
+static ABI uint64_t direct_size(void) { return GAME_POOL_SIZE; }
 static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
                                   uint64_t alignment, int type, int64_t *out) {
     if (!alignment) alignment = PAGE;
     if (!out || low < 0 || high < 0 || !size || size % PAGE || !valid_alignment(alignment) || type < 0 || type > 10)
         return INVALID;
-    uint64_t end = (uint64_t)high < POOL_SIZE ? (uint64_t)high : POOL_SIZE;
+    uint64_t end = (uint64_t)high < GAME_POOL_SIZE ? (uint64_t)high : GAME_POOL_SIZE;
     if ((uint64_t)low >= end || size > end - (uint64_t)low) return NO_SPACE;
     write_lock();
     if (pool()) { write_unlock(); return NO_MEMORY; }
@@ -560,6 +590,61 @@ static ABI int32_t direct_map(void **out, uint64_t size, int prot, int flags, in
 static ABI int32_t direct_map_named(void **out, uint64_t size, int prot, int flags, int64_t physical,
                                     uint64_t alignment, const char *name) {
     (void)name; return direct_map(out,size,prot,flags,physical,alignment);
+}
+/* bbport: `size` bytes of direct memory past the game's size (extra_pool_bytes), mapped at an
+ * address of the runtime's choosing with the protection and memory type of the game's direct
+ * mapping that holds `like` (none there or NULL: CPU and GPU read and write, type 3); the GPU side
+ * is told as of a game mapping. 0 or the error. */
+int runtime_extra_direct_map_like(uint64_t size, uint64_t alignment, const void *like, void **out) {
+    if (!out || !size || size % PAGE || !valid_alignment(alignment)) return INVALID;
+    write_lock();
+    if (pool()) { write_unlock(); return NO_MEMORY; }
+    int prot=0x33, type=3;
+    uintptr_t from=0, from_end=0; /* the game's mapping they come from, none for the defaults */
+    if (like) {
+        const size_t i=vma_index((uintptr_t)like);
+        if (i<vma_count && vmas[i].start<=(uintptr_t)like && vmas[i].kind==KIND_DIRECT && vmas[i].type>=0) {
+            prot=vmas[i].prot; type=vmas[i].type; from=vmas[i].start; from_end=vmas[i].end;
+        }
+    }
+#ifdef _WIN32
+    /* Committed as the game maps it (the pool did not fit Windows' commit limit): memory is short,
+     * and a commit that fails later ends the game. */
+    if (commit_on_map) {
+        write_unlock();
+        printf("Runtime: no port direct memory: guest memory is committed as the game maps it\n");
+        return NO_MEMORY;
+    }
+#endif
+    const uint64_t end=POOL_SIZE;
+    uint64_t start=align_up(GAME_POOL_SIZE,alignment);
+    int slot=-1;
+    for (int i=0;i<LIMIT;++i) if (!blocks[i].used) { slot=i; break; }
+    for (;;) {
+        if (slot<0 || start>end || size>end-start) { write_unlock(); return NO_SPACE; }
+        int overlap=0;
+        for (int i=0;i<LIMIT;++i) {
+            const Block b=blocks[i];
+            if (b.used && start<b.start+b.size && b.start<start+size) { start=align_up(b.start+b.size,alignment); overlap=1; break; }
+        }
+        if (!overlap) break;
+    }
+    blocks[slot]=(Block){start,size,type,1};
+    *out=NULL;
+    const int32_t result=map_direct_locked(out,size,prot,0,(int64_t)start,alignment);
+    if (result) blocks[slot].used=0;
+    write_unlock();
+    flush_hooks();
+    if (!result) {
+        char origin[64];
+        if (from) snprintf(origin,sizeof(origin),"as the game's mapping %p-%p",(void *)from,(void *)from_end);
+        else snprintf(origin,sizeof(origin),"the defaults");
+        printf("Runtime: port direct memory %p, size=%" PRIu64 ", prot=0x%x, type=%d (%s; past the game's %" PRIu64 " MiB)\n", *out, size, prot, type, origin, GAME_POOL_SIZE>>20);
+    }
+    return result;
+}
+int runtime_extra_direct_map(uint64_t size, uint64_t alignment, void **out) {
+    return runtime_extra_direct_map_like(size,alignment,NULL,out);
 }
 static int32_t unmap_locked(uintptr_t start, uint64_t size) {
     if (start%PAGE || !size) return INVALID;

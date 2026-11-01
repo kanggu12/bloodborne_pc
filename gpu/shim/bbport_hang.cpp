@@ -22,6 +22,7 @@
 
 #include "../bbgpu.h"
 #include "bbport_hang_snapshot.h"
+#include "bbport_render_cache.h"
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -93,6 +94,7 @@ void Watch() {
                     std::printf("Hang check: no frame shown for %.1f s; threads written to %s "
                                 "(kept until frames stop again)\n",
                                 quiet, path.c_str());
+                    BbRenderCache::OnStall(); // local fix 0009: its counts, without a flip
                 }
                 hang_snapshot = Clock::now();
                 hung = true;
@@ -105,6 +107,7 @@ void Watch() {
         }
         if (periodic_stacks && Clock::now() - periodic >= 20s) {
             Write("periodic", false);
+            BbRenderCache::OnStall();
             periodic = Clock::now();
         }
         if (const auto now = Clock::now(); now - minute >= 60s) {

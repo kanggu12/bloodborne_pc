@@ -27,6 +27,9 @@ void bbnet_initialize(void);
 void bbgpu_frame_rate_patch(unsigned char *image, uint64_t size);
 /* bbport: the game's image, for the thread snapshots of shim/bbport_hang.cpp. */
 void bbgpu_hang_set_image(unsigned char *image, uint64_t size);
+/* bbport: the render resource cache gets the port's direct memory past the game's size
+ * (shim/bbport_render_cache.cpp). After the patches, while the image is writable. */
+void bbgpu_render_cache_patch(unsigned char *image, uint64_t size);
 /* Creates window, Vulkan device, presenter and GPU command processor. */
 int bbgpu_init(const BbGpuConfig *config);
 /* Function for an imported NID ("NID#lib#mod"), or 0 when the GPU library does not provide it. */
