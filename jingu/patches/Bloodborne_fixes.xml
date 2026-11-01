@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<Patch>
+    <TitleID>
+        <ID>CUSA03173</ID>
+    </TitleID>
+        <Metadata Title="Bloodborne" Name="Exit Fix: Exit Game (title menu) Closes Cleanly v2026.10.20" Note="For use with Bloodborne_exit_game.xml (Exit Game (title menu)), applied after it. \nThat patch ends the game with the game's own exit(0), which runs the game's destructors while its threads still run: \n18 [Dantelion2 Panic] lines (invalid mutex) at every exit. \nThis sends the port's quit request (bb:q through sceSystemServiceLaunchWebBrowser) instead, the same way the port's own Quit to Desktop closes the game." Author="Jin-Gu" PatchVer="2026.10.20" AppVer="01.09" AppElf="eboot.bin" isEnabled="true">
+        <PatchList>
+            <Line Type="bytes" Address="0x01f46030" Value="534889fb488d3d1300000031f6e866a9070148c703000000004889d85bc362623a7100"/>
+        </PatchList>
+    </Metadata>
+    <Metadata Title="Bloodborne" Name="Compatibility Fix: SSR with the Performance Patch v2026.10.24" Note="For 'Enable Screen Space Reflections (READ NOTE)' (on in the launcher) together with the external Bloodborne.xml performance patch (성능향상패치). \nSSR turns mov byte [r13+0x2977],1 at 0x26C4FD0 into mov byte [r13+0x2974],1, its switch. \nThe port applies the performance patch after it, and that patch writes 00 at 0x026C4FD7, the switch value: SSR stays off. \nThis writes SSR's 01 back after both. With SSR off in the launcher the byte is the game's original value; turn this off too then." Author="Jin-Gu" PatchVer="2026.10.24" AppVer="01.09" AppElf="eboot.bin" isEnabled="false">
+        <PatchList>
+            <Line Type="bytes" Address="0x026C4FD7" Value="01"/>
+        </PatchList>
+    </Metadata>
+</Patch>
